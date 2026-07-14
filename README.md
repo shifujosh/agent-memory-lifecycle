@@ -2,7 +2,7 @@
 
 An evidence-aware lifecycle for agent memory.
 
-AI systems need context to be useful. They also need to distinguish a useful lead from a trusted fact. This clean-room reference implementation keeps new claims proposed until a reviewer accepts them or independent sources corroborate them.
+AI systems need context to be useful. They also need to distinguish a useful lead from a trusted fact. This clean-room reference implementation keeps new claims proposed until a reviewer accepts them or qualified, independent sources corroborate them.
 
 It is for teams building agents that operate around customer commitments, operational procedures, regulated decisions, or other work where an incorrect remembered detail can create real cost.
 
@@ -32,7 +32,7 @@ flowchart LR
   C -->|Replacement recorded| S
 ```
 
-**Trust threshold:** one accepted review, or two evidence records with distinct source references.
+**Trust threshold:** one accepted human review, or two qualifying evidence records from distinct independence keys.
 
 Two deliberate exits sit outside the normal path:
 
@@ -54,10 +54,11 @@ The state is a policy signal for the surrounding agent, not a confidence score:
 The core deliberately makes a few strong choices:
 
 1. **Repeated retrieval is not evidence.** Reads, model citations, and access counts are outside the policy. They show attention, not truth.
-2. **A source counts once.** Multiple excerpts, tickets, or copies from the same `sourceRef` are retained for context but cannot manufacture corroboration.
-3. **Human acceptance is explicit.** One named acceptance review can confirm a claim, and its reason becomes part of the event history.
-4. **Confirmed does not mean permanent.** Confirmed memories never decay automatically, but they can only change through an explicit supersession or retraction.
-5. **Semantic conflict is not guessed.** A new claim does not invalidate an old one until a person records the replacement relationship and reason.
+2. **A source counts once by authority, not filename.** Each evidence record carries an `independenceKey`. Copies or multiple references from the same underlying authority cannot manufacture corroboration.
+3. **Authority is declared.** Evidence records identify their source authority, and the lifecycle policy decides which authority kinds can count toward confirmation.
+4. **Human acceptance is explicit.** One named human review can confirm a claim, and its reason becomes part of the event history.
+5. **Confirmed does not mean permanent.** Confirmed memories never decay automatically, but they can only change through an explicit supersession or retraction.
+6. **Semantic conflict is not guessed.** A new claim does not invalidate an old one until a person records the replacement relationship and reason.
 
 These rules are intentionally conservative. The policy is designed to make uncertainty visible and recoverable, rather than making an agent sound certain too early.
 
@@ -77,7 +78,7 @@ That creates two bad outcomes: people spend time rechecking everything, or they 
 | --- | --- | --- |
 | A ticket is captured | `proposed` | Say it found a possible rule and show the source. It must not present the rule as settled. |
 | The security runbook is attached | `proposed` | Show that one source supports the claim and continue to seek an independent source or review. |
-| A signed access matrix is attached | `confirmed` | State the requirement, link the two source references, and support the onboarding workflow. |
+| A signed access matrix is attached from an independent authority | `confirmed` | State the requirement, link the supporting evidence, and support the onboarding workflow. |
 | A contract amendment changes the rule | Old record is `superseded`; replacement starts `proposed` | Stop using the old rule as current. Keep both records and the explicit reason for the replacement. |
 
 The practical outcome is not just better recall. It is less time spent rechecking scattered information, clearer handoffs between teams, and a visible basis for every high-stakes answer.
@@ -99,6 +100,10 @@ import {
 let memory = proposeMemory({
   id: 'contractor-access',
   claim: {
+    scope: {
+      namespace: 'customer:acme',
+      appliesTo: 'contractor-access',
+    },
     subject: 'Acme contractor access',
     predicate: 'requires',
     value: 'manager approval',
@@ -108,17 +113,37 @@ let memory = proposeMemory({
 memory = addEvidence(memory, {
   id: 'source-1',
   sourceRef: 'security-runbook-v4',
+  scope: {
+    namespace: 'customer:acme',
+    appliesTo: 'contractor-access',
+  },
+  authority: {
+    kind: 'approved-policy',
+    authorityRef: 'acme-security-governance',
+    independenceKey: 'acme-security-team',
+  },
   capturedAt: '2026-07-02T00:00:00.000Z',
+  recordedBy: { id: 'policy-ingestion', kind: 'integration' },
 });
 
 const pending = decideLifecycle(memory);
 // pending.nextStatus === 'proposed'
-// pending.reason === 'Still proposed: 1 of 2 distinct source references ...'
+// pending.reason === 'Still proposed: 1 of 2 independent qualified sources ...'
 
 memory = addEvidence(memory, {
   id: 'source-2',
   sourceRef: 'signed-access-matrix-acme',
+  scope: {
+    namespace: 'customer:acme',
+    appliesTo: 'contractor-access',
+  },
+  authority: {
+    kind: 'customer-contract',
+    authorityRef: 'acme-legal',
+    independenceKey: 'acme-legal',
+  },
   capturedAt: '2026-07-03T00:00:00.000Z',
+  recordedBy: { id: 'contract-ingestion', kind: 'integration' },
 });
 
 const decision = decideLifecycle(memory);
@@ -133,15 +158,18 @@ This separation gives an integrating system a useful control point: log or displ
 
 ## Engineering model
 
-The policy core has five validated, serializable models:
+The policy core has validated, serializable models and invariants:
 
-- `MemoryRecord`: one claim, its evidence, reviews, events, status, and explicit replacement or retraction metadata.
-- `Evidence`: a source reference, capture time, and optional summary.
-- `Review`: a named acceptance or rejection with a reason and timestamp.
-- `LifecyclePolicy`: the required number of distinct source references and proposed-memory expiry window.
+- `Scope`: the namespace and operational context in which a claim applies. Evidence and replacement claims must match it.
+- `MemoryRecord`: one canonicalized claim, its evidence, reviews, events, status, and explicit replacement or retraction metadata.
+- `Evidence`: a source reference, source scope, authority kind, independence key, capture time, and the actor who recorded it.
+- `Review`: a named human acceptance or rejection with an authority reference, reason, review time, and recorded event.
+- `LifecyclePolicy`: qualifying evidence authority kinds, the required number of independent sources, and the proposed-memory expiry window.
 - `LifecycleDecision`: the current state, next state, permitted automatic transition, and human-readable reason.
 
-Every public function returns a new record. Previous record objects and prior events remain unchanged, which makes state changes easy to test, log, and audit. The policy core does not need to decide where records live or how an agent retrieves them.
+`capturedAt` and `reviewedAt` describe when a source or review occurred. Lifecycle events use the time they were **recorded**, so attaching an older document today does not make a current proposal look inactive. Event IDs are ordered, unique within a record, and returned records are deeply frozen. Record validation rejects impossible terminal states, unordered events, mismatched canonical claims, and stale activity timestamps.
+
+Supersession requires a real, already-confirmed replacement record in the same scope with a different canonical claim. This does not provide the database transaction that persists both records, but it prevents the policy core from accepting an arbitrary string as a replacement.
 
 ## Integration boundary
 
@@ -151,7 +179,7 @@ This repository is intentionally small. An application can put the policy core b
 - `confirmed` can be supplied as operational context, together with its evidence and event history.
 - `superseded`, `retracted`, and `expired` should remain inspectable but excluded from the agent's current operating context.
 
-The reference does **not** provide storage adapters, embeddings, graph retrieval, LLM calls, user accounts, APIs, UI, authorization, conflict detection, or a memory database. It also does not decide whether a source is truly independent. It only enforces that distinct `sourceRef` values are required by the policy.
+The reference does **not** provide storage adapters, embeddings, graph retrieval, LLM calls, user accounts, APIs, UI, authorization, conflict detection, or a memory database. It also cannot prove that an `independenceKey` or authority reference is truthful. An integrating system must govern and authenticate those identifiers, then persist multi-record supersessions atomically.
 
 ## What this demonstrates
 
