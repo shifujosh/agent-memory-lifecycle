@@ -89,68 +89,82 @@ The library separates **deciding** from **transitioning**.
 
 `decideLifecycle` is pure and returns a `LifecycleDecision` explaining the next state, whether a transition is allowed, and why. `evaluateLifecycle` applies that decision by returning a new immutable record with the corresponding event.
 
+The package is intentionally not published to npm. To run this example, clone the repository, run `pnpm run build`, and save it as `example.mjs` at the repository root.
+
 ```ts
 import {
   addEvidence,
   decideLifecycle,
   evaluateLifecycle,
   proposeMemory,
-} from 'agent-memory-lifecycle';
+} from './dist/index.js';
 
-let memory = proposeMemory({
-  id: 'contractor-access',
-  claim: {
-    scope: {
-      namespace: 'customer:acme',
-      appliesTo: 'contractor-access',
+const scope = {
+  namespace: 'customer:acme',
+  appliesTo: 'contractor-access',
+};
+
+const ingestedBy = {
+  id: 'policy-ingestion',
+  kind: 'integration',
+};
+
+let memory = proposeMemory(
+  {
+    id: 'contractor-access',
+    claim: {
+      scope,
+      subject: 'Acme contractor access',
+      predicate: 'requires',
+      value: 'manager approval',
     },
-    subject: 'Acme contractor access',
-    predicate: 'requires',
-    value: 'manager approval',
   },
-});
+  new Date('2026-07-04T09:00:00.000Z'),
+);
 
-memory = addEvidence(memory, {
-  id: 'source-1',
-  sourceRef: 'security-runbook-v4',
-  scope: {
-    namespace: 'customer:acme',
-    appliesTo: 'contractor-access',
+memory = addEvidence(
+  memory,
+  {
+    id: 'runbook',
+    sourceRef: 'security-runbook-v4',
+    scope,
+    authority: {
+      kind: 'approved-policy',
+      authorityRef: 'acme-security-governance',
+      independenceKey: 'acme-security-team',
+    },
+    capturedAt: '2026-07-02T00:00:00.000Z',
+    recordedBy: ingestedBy,
   },
-  authority: {
-    kind: 'approved-policy',
-    authorityRef: 'acme-security-governance',
-    independenceKey: 'acme-security-team',
-  },
-  capturedAt: '2026-07-02T00:00:00.000Z',
-  recordedBy: { id: 'policy-ingestion', kind: 'integration' },
-});
+  new Date('2026-07-04T09:05:00.000Z'),
+);
 
 const pending = decideLifecycle(memory);
 // pending.nextStatus === 'proposed'
 // pending.reason === 'Still proposed: 1 of 2 independent qualified sources ...'
 
-memory = addEvidence(memory, {
-  id: 'source-2',
-  sourceRef: 'signed-access-matrix-acme',
-  scope: {
-    namespace: 'customer:acme',
-    appliesTo: 'contractor-access',
+memory = addEvidence(
+  memory,
+  {
+    id: 'access-matrix',
+    sourceRef: 'signed-access-matrix-acme',
+    scope,
+    authority: {
+      kind: 'customer-contract',
+      authorityRef: 'acme-legal',
+      independenceKey: 'acme-legal',
+    },
+    capturedAt: '2026-07-03T00:00:00.000Z',
+    recordedBy: ingestedBy,
   },
-  authority: {
-    kind: 'customer-contract',
-    authorityRef: 'acme-legal',
-    independenceKey: 'acme-legal',
-  },
-  capturedAt: '2026-07-03T00:00:00.000Z',
-  recordedBy: { id: 'contract-ingestion', kind: 'integration' },
-});
+  new Date('2026-07-04T09:10:00.000Z'),
+);
 
 const decision = decideLifecycle(memory);
 // decision.nextStatus === 'confirmed'
-// decision.reason explains the corroboration threshold that was met
+// decision.reason === 'Confirmed by 2 independent qualified sources.'
 
-memory = evaluateLifecycle(memory);
+memory = evaluateLifecycle(memory, {}, new Date('2026-07-04T09:10:01.000Z'));
 // memory.status === 'confirmed'
 ```
 
