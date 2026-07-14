@@ -56,9 +56,10 @@ The core deliberately makes a few strong choices:
 1. **Repeated retrieval is not evidence.** Reads, model citations, and access counts are outside the policy. They show attention, not truth.
 2. **A source counts once by authority, not filename.** Each evidence record carries an `independenceKey`. Copies or multiple references from the same underlying authority cannot manufacture corroboration.
 3. **Authority is declared.** Evidence records identify their source authority, and the lifecycle policy decides which authority kinds can count toward confirmation.
-4. **Human acceptance is explicit.** One named human review can confirm a claim, and its reason becomes part of the event history.
-5. **Confirmed does not mean permanent.** Confirmed memories never decay automatically, but they can only change through an explicit supersession or retraction.
-6. **Semantic conflict is not guessed.** A new claim does not invalidate an old one until a person records the replacement relationship and reason.
+4. **Human review has an ordered outcome.** Reviews are strictly time-ordered. The latest accepted review confirms a claim; the latest rejection blocks automatic confirmation, even if the evidence threshold is met, until a later review changes that outcome.
+5. **Source identity is normalized.** A source reference can be attached once, and independence keys are normalized before corroboration is counted. Formatting differences cannot create a second source or authority.
+6. **Confirmed does not mean permanent.** Confirmed memories never decay automatically, but they can only change through an explicit supersession or retraction.
+7. **Semantic conflict is not guessed.** A new claim does not invalidate an old one until a person records the replacement relationship and reason.
 
 These rules are intentionally conservative. The policy is designed to make uncertainty visible and recoverable, rather than making an agent sound certain too early.
 
@@ -87,7 +88,7 @@ The practical outcome is not just better recall. It is less time spent recheckin
 
 The library separates **deciding** from **transitioning**.
 
-`decideLifecycle` is pure and returns a `LifecycleDecision` explaining the next state, whether a transition is allowed, and why. `evaluateLifecycle` applies that decision by returning a new immutable record with the corresponding event.
+`decideLifecycle` is pure and returns a `LifecycleDecision` explaining the next state, whether a transition is allowed, and why. Its `basis` also exposes the qualified-source count, the policy threshold, and the most recent review outcome, so an integration can log or display the actual decision inputs without parsing the reason string. `evaluateLifecycle` applies that decision by returning a new immutable record with the corresponding event.
 
 The package is intentionally not published to npm. To run this example, clone the repository, run `pnpm run build`, and save it as `example.mjs` at the repository root.
 
@@ -163,6 +164,7 @@ memory = addEvidence(
 const decision = decideLifecycle(memory);
 // decision.nextStatus === 'confirmed'
 // decision.reason === 'Confirmed by 2 independent qualified sources.'
+// decision.basis.qualifiedIndependentSources === 2
 
 memory = evaluateLifecycle(memory, {}, new Date('2026-07-04T09:10:01.000Z'));
 // memory.status === 'confirmed'
@@ -179,9 +181,9 @@ The policy core has validated, serializable models and invariants:
 - `Evidence`: a source reference, source scope, authority kind, independence key, capture time, and the actor who recorded it.
 - `Review`: a named human acceptance or rejection with an authority reference, reason, review time, and recorded event.
 - `LifecyclePolicy`: qualifying evidence authority kinds, the required number of independent sources, and the proposed-memory expiry window.
-- `LifecycleDecision`: the current state, next state, permitted automatic transition, and human-readable reason.
+- `LifecycleDecision`: the current state, next state, permitted automatic transition, human-readable reason, and inspectable decision basis.
 
-`capturedAt` and `reviewedAt` describe when a source or review occurred. Lifecycle events use the time they were **recorded**, so attaching an older document today does not make a current proposal look inactive. Event IDs are ordered, unique within a record, and returned records are deeply frozen. Record validation rejects impossible terminal states, unordered events, mismatched canonical claims, and stale activity timestamps.
+`capturedAt` and `reviewedAt` describe when a source or review occurred. Lifecycle events use the time they were **recorded**, so attaching an older document today does not make a current proposal look inactive. Evaluations cannot run against a time before the latest recorded activity. Event IDs are ordered, unique within a record, and returned records are deeply frozen. Record validation also rejects duplicate normalized source references, ambiguous review order, impossible terminal states, unordered events, mismatched canonical claims, and stale activity timestamps.
 
 Supersession requires a real, already-confirmed replacement record in the same scope with a different canonical claim. This does not provide the database transaction that persists both records, but it prevents the policy core from accepting an arbitrary string as a replacement.
 

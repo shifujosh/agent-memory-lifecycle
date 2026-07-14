@@ -158,6 +158,60 @@ export const MemoryRecordSchema = MemoryRecordBaseSchema.superRefine((record, co
     priorTimestamp = timestamp;
   }
 
+  const evidenceIds = new Set<string>();
+  const sourceRefs = new Set<string>();
+  for (const [index, evidence] of record.evidence.entries()) {
+    if (evidenceIds.has(evidence.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Evidence IDs must be unique.',
+        path: ['evidence', index, 'id'],
+      });
+    }
+    evidenceIds.add(evidence.id);
+
+    const sourceRef = normalize(evidence.sourceRef);
+    if (sourceRefs.has(sourceRef)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Evidence source references must be unique after normalization.',
+        path: ['evidence', index, 'sourceRef'],
+      });
+    }
+    sourceRefs.add(sourceRef);
+
+    if (scopeKey(evidence.scope) !== scopeKey(record.claim.scope)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Evidence scope must match the memory claim scope.',
+        path: ['evidence', index, 'scope'],
+      });
+    }
+  }
+
+  const reviewIds = new Set<string>();
+  let priorReviewTimestamp = -Infinity;
+  for (const [index, review] of record.reviews.entries()) {
+    if (reviewIds.has(review.id)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Review IDs must be unique.',
+        path: ['reviews', index, 'id'],
+      });
+    }
+    reviewIds.add(review.id);
+
+    const timestamp = Date.parse(review.reviewedAt);
+    if (timestamp <= priorReviewTimestamp) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Reviews must be strictly ordered by reviewedAt.',
+        path: ['reviews', index, 'reviewedAt'],
+      });
+    }
+    priorReviewTimestamp = timestamp;
+  }
+
   if (record.lastActivityAt !== record.events.at(-1)?.occurredAt) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -167,6 +221,23 @@ export const MemoryRecordSchema = MemoryRecordBaseSchema.superRefine((record, co
   }
 
   const eventTypes = new Set(record.events.map((event) => event.type));
+  const terminalEvents = record.events.filter((event) =>
+    ['superseded', 'retracted', 'expired'].includes(event.type),
+  );
+  if (terminalEvents.length > 1) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'A memory may have only one terminal lifecycle event.',
+      path: ['events'],
+    });
+  }
+  if (terminalEvents.length === 1 && record.events.at(-1)?.id !== terminalEvents[0]?.id) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'A terminal lifecycle event must be the final event.',
+      path: ['events'],
+    });
+  }
   const terminalStateRules: Partial<Record<LifecycleStatus, { event: LifecycleEvent['type']; field?: keyof typeof record }>> = {
     confirmed: { event: 'confirmed' },
     superseded: { event: 'superseded', field: 'supersededBy' },
@@ -188,17 +259,59 @@ export const MemoryRecordSchema = MemoryRecordBaseSchema.superRefine((record, co
       path: [terminalRule.field],
     });
   }
+
+  if (record.status === 'proposed' && (eventTypes.has('confirmed') || terminalEvents.length > 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Proposed records cannot contain confirmation or terminal events.',
+      path: ['status'],
+    });
+  }
+  if (record.status === 'confirmed' && !eventTypes.has('confirmed')) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Confirmed records require a confirmed event.',
+      path: ['events'],
+    });
+  }
+  if (record.status === 'confirmed' && terminalEvents.length > 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Confirmed records cannot contain terminal events.',
+      path: ['status'],
+    });
+  }
+  if (record.status === 'superseded' && !eventTypes.has('confirmed')) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Superseded records require a prior confirmed event.',
+      path: ['events'],
+    });
+  }
+  if (record.status === 'expired' && eventTypes.has('confirmed')) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Expired records cannot contain a confirmed event.',
+      path: ['events'],
+    });
+  }
 });
 export type MemoryRecord = z.infer<typeof MemoryRecordSchema>;
 
 export const LifecyclePolicySchema = z.object({
   requiredIndependentSources: z.number().int().min(2).default(2),
-  qualifyingAuthorityKinds: z.array(SourceAuthorityKindSchema).min(1).default([
-    'customer-contract',
-    'approved-policy',
-    'system-of-record',
-    'human-attestation',
-  ]),
+  qualifyingAuthorityKinds: z
+    .array(SourceAuthorityKindSchema)
+    .min(1)
+    .refine((kinds) => new Set(kinds).size === kinds.length, {
+      message: 'qualifyingAuthorityKinds must not contain duplicates.',
+    })
+    .default([
+      'customer-contract',
+      'approved-policy',
+      'system-of-record',
+      'human-attestation',
+    ]),
   proposedTtlDays: z.number().int().min(1).default(30),
 });
 export type LifecyclePolicy = z.infer<typeof LifecyclePolicySchema>;
@@ -208,6 +321,11 @@ export const LifecycleDecisionSchema = z.object({
   nextStatus: LifecycleStatusSchema,
   transition: z.enum(['confirmed', 'expired']).nullable(),
   reason: z.string().trim().min(1),
+  basis: z.object({
+    qualifiedIndependentSources: z.number().int().min(0),
+    requiredIndependentSources: z.number().int().min(2),
+    latestReview: z.enum(['accepted', 'rejected']).nullable(),
+  }),
 });
 export type LifecycleDecision = z.infer<typeof LifecycleDecisionSchema>;
 
@@ -354,6 +472,9 @@ export function addEvidence(
   if (memory.evidence.some((item) => item.id === evidence.id)) {
     throw new Error(`Evidence ID "${evidence.id}" already exists on this memory.`);
   }
+  if (memory.evidence.some((item) => normalize(item.sourceRef) === normalize(evidence.sourceRef))) {
+    throw new Error(`Evidence sourceRef "${evidence.sourceRef}" already exists on this memory.`);
+  }
   if (scopeKey(evidence.scope) !== scopeKey(memory.claim.scope)) {
     throw new Error('Evidence scope must match the memory claim scope.');
   }
@@ -384,6 +505,10 @@ export function recordReview(
   if (Date.parse(review.reviewedAt) > recordedAt.getTime()) {
     throw new Error('Review reviewedAt cannot be later than the time it is recorded.');
   }
+  const latestReview = memory.reviews.at(-1);
+  if (latestReview && Date.parse(review.reviewedAt) <= Date.parse(latestReview.reviewedAt)) {
+    throw new Error('Review reviewedAt must be later than the latest recorded review.');
+  }
 
   return appendEvent(
     memory,
@@ -407,7 +532,7 @@ export function independentSourceCount(
   return new Set(
     memory.evidence
       .filter((evidence) => policy.qualifyingAuthorityKinds.includes(evidence.authority.kind))
-      .map((evidence) => evidence.authority.independenceKey),
+      .map((evidence) => normalize(evidence.authority.independenceKey)),
   ).size;
 }
 
@@ -426,6 +551,17 @@ export function decideLifecycle(
 ): LifecycleDecision {
   const memory = parseRecord(record);
   const policy = parsePolicy(policyInput);
+  if (now.getTime() < Date.parse(memory.lastActivityAt)) {
+    throw new Error('Evaluation time cannot precede the latest lifecycle activity.');
+  }
+
+  const sourceCount = independentSourceCount(memory, policy);
+  const latestReview = memory.reviews.at(-1);
+  const basis = {
+    qualifiedIndependentSources: sourceCount,
+    requiredIndependentSources: policy.requiredIndependentSources,
+    latestReview: latestReview?.decision ?? null,
+  };
 
   if (memory.status !== 'proposed') {
     return LifecycleDecisionSchema.parse({
@@ -433,26 +569,17 @@ export function decideLifecycle(
       nextStatus: memory.status,
       transition: null,
       reason: `No automatic transition is permitted for ${memory.status} memories.`,
+      basis,
     });
   }
 
-  const acceptedReview = memory.reviews.find((review) => review.decision === 'accepted');
-  if (acceptedReview) {
+  if (latestReview?.decision === 'accepted') {
     return LifecycleDecisionSchema.parse({
       currentStatus: 'proposed',
       nextStatus: 'confirmed',
       transition: 'confirmed',
-      reason: `Confirmed by accepted review from ${acceptedReview.reviewer.id}.`,
-    });
-  }
-
-  const sourceCount = independentSourceCount(memory, policy);
-  if (sourceCount >= policy.requiredIndependentSources) {
-    return LifecycleDecisionSchema.parse({
-      currentStatus: 'proposed',
-      nextStatus: 'confirmed',
-      transition: 'confirmed',
-      reason: `Confirmed by ${sourceCount} independent qualified sources.`,
+      reason: `Confirmed by accepted review from ${latestReview.reviewer.id}.`,
+      basis,
     });
   }
 
@@ -464,6 +591,27 @@ export function decideLifecycle(
       nextStatus: 'expired',
       transition: 'expired',
       reason: `Proposed memory expired after ${policy.proposedTtlDays} inactive days.`,
+      basis,
+    });
+  }
+
+  if (latestReview?.decision === 'rejected') {
+    return LifecycleDecisionSchema.parse({
+      currentStatus: 'proposed',
+      nextStatus: 'proposed',
+      transition: null,
+      reason: `Still proposed: latest review from ${latestReview.reviewer.id} was rejected and blocks automatic confirmation.`,
+      basis,
+    });
+  }
+
+  if (sourceCount >= policy.requiredIndependentSources) {
+    return LifecycleDecisionSchema.parse({
+      currentStatus: 'proposed',
+      nextStatus: 'confirmed',
+      transition: 'confirmed',
+      reason: `Confirmed by ${sourceCount} independent qualified sources.`,
+      basis,
     });
   }
 
@@ -472,6 +620,7 @@ export function decideLifecycle(
     nextStatus: 'proposed',
     transition: null,
     reason: `Still proposed: ${sourceCount} of ${policy.requiredIndependentSources} independent qualified sources and no accepted review.`,
+    basis,
   });
 }
 

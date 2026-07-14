@@ -96,6 +96,11 @@ describe('agent-memory-lifecycle', () => {
       currentStatus: 'proposed',
       nextStatus: 'confirmed',
       transition: 'confirmed',
+      basis: {
+        qualifiedIndependentSources: 0,
+        requiredIndependentSources: 2,
+        latestReview: 'accepted',
+      },
     });
     expect(decision.reason).toContain('security-owner');
   });
@@ -130,6 +135,37 @@ describe('agent-memory-lifecycle', () => {
 
     expect(independentSourceCount(duplicateAuthority)).toBe(1);
     expect(decideLifecycle(duplicateAuthority, {}, new Date('2026-07-03T02:00:00.000Z')).nextStatus).toBe('proposed');
+  });
+
+  it('normalizes independence keys before counting corroboration', () => {
+    const first = addEvidence(
+      proposedMemory(),
+      evidence('evidence-1', 'security-runbook-v4', 'Acme Security Team'),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+    const sameAuthority = addEvidence(
+      first,
+      evidence('evidence-2', 'security-addendum-v2', ' acme   security team '),
+      new Date('2026-07-03T01:00:00.000Z'),
+    );
+
+    expect(independentSourceCount(sameAuthority)).toBe(1);
+  });
+
+  it('rejects duplicate source references even when their IDs differ', () => {
+    const first = addEvidence(
+      proposedMemory(),
+      evidence('evidence-1', 'security-runbook-v4', 'security-team'),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+
+    expect(() =>
+      addEvidence(
+        first,
+        evidence('evidence-2', ' SECURITY-RUNBOOK-V4 ', 'customer-legal'),
+        new Date('2026-07-03T01:00:00.000Z'),
+      ),
+    ).toThrow('sourceRef');
   });
 
   it('does not let unclassified evidence confirm a claim', () => {
@@ -174,6 +210,18 @@ describe('agent-memory-lifecycle', () => {
         new Date('2026-07-02T01:00:00.000Z'),
       ),
     ).toThrow('scope');
+  });
+
+  it('validates attached evidence scope again when records are rehydrated', () => {
+    const recorded = addEvidence(
+      proposedMemory(),
+      evidence('evidence-1', 'security-runbook-v4', 'security-team'),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+    const forged = structuredClone(recorded);
+    forged.evidence[0].scope.namespace = 'customer:other';
+
+    expect(() => MemoryRecordSchema.parse(forged)).toThrow('Evidence scope must match');
   });
 
   it('enforces lifecycle invariants and freezes returned records', () => {
@@ -244,7 +292,96 @@ describe('agent-memory-lifecycle', () => {
       new Date('2026-07-02T01:00:00.000Z'),
     );
 
-    expect(decideLifecycle(rejected).nextStatus).toBe('proposed');
+    const decision = decideLifecycle(rejected, {}, new Date('2026-07-02T02:00:00.000Z'));
+
+    expect(decision).toMatchObject({
+      nextStatus: 'proposed',
+      transition: null,
+      basis: { latestReview: 'rejected' },
+    });
+    expect(decision.reason).toContain('blocks automatic confirmation');
+  });
+
+  it('lets the latest human review block corroboration until a later acceptance', () => {
+    const first = addEvidence(
+      proposedMemory(),
+      evidence('evidence-1', 'security-runbook-v4', 'security-team'),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+    const corroborated = addEvidence(
+      first,
+      evidence('evidence-2', 'signed-access-matrix-acme', 'customer-legal'),
+      new Date('2026-07-03T01:00:00.000Z'),
+    );
+    const rejected = recordReview(
+      corroborated,
+      {
+        ...acceptedReview(),
+        decision: 'rejected',
+        reviewedAt: '2026-07-03T02:00:00.000Z',
+        reason: 'The signed matrix is being amended.',
+      },
+      new Date('2026-07-03T02:01:00.000Z'),
+    );
+
+    expect(decideLifecycle(rejected, {}, new Date('2026-07-03T03:00:00.000Z'))).toMatchObject({
+      nextStatus: 'proposed',
+      transition: null,
+      basis: { qualifiedIndependentSources: 2, latestReview: 'rejected' },
+    });
+
+    const accepted = recordReview(
+      rejected,
+      {
+        ...acceptedReview('review-2'),
+        reviewedAt: '2026-07-03T04:00:00.000Z',
+        reason: 'The amended matrix is now approved.',
+      },
+      new Date('2026-07-03T04:01:00.000Z'),
+    );
+
+    expect(decideLifecycle(accepted, {}, new Date('2026-07-03T05:00:00.000Z')).nextStatus).toBe('confirmed');
+  });
+
+  it('requires review decisions to have an unambiguous order', () => {
+    const accepted = recordReview(
+      proposedMemory(),
+      acceptedReview(),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+
+    expect(() =>
+      recordReview(
+        accepted,
+        {
+          ...acceptedReview('review-2'),
+          decision: 'rejected',
+          reviewedAt: '2026-07-01T23:00:00.000Z',
+          reason: 'Out-of-order review.',
+        },
+        new Date('2026-07-02T02:00:00.000Z'),
+      ),
+    ).toThrow('later than the latest');
+  });
+
+  it('rejects a policy evaluation from before the latest activity', () => {
+    const updated = addEvidence(
+      proposedMemory(),
+      evidence('evidence-1', 'security-runbook-v4', 'security-team'),
+      new Date('2026-07-02T01:00:00.000Z'),
+    );
+
+    expect(() => decideLifecycle(updated, {}, new Date('2026-07-02T00:30:00.000Z'))).toThrow(
+      'Evaluation time cannot precede',
+    );
+  });
+
+  it('rejects duplicate authority kinds in a policy', () => {
+    expect(() =>
+      decideLifecycle(proposedMemory(), {
+        qualifyingAuthorityKinds: ['approved-policy', 'approved-policy'],
+      }),
+    ).toThrow('must not contain duplicates');
   });
 
   it('exposes only defined lifecycle statuses', () => {
