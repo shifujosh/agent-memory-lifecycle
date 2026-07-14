@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   addEvidence,
+  decideLifecycle,
   distinctSourceCount,
   evaluateLifecycle,
   proposeMemory,
@@ -78,6 +79,41 @@ describe('agent-memory-lifecycle', () => {
 
     expect(distinctSourceCount(duplicateSource)).toBe(1);
     expect(evaluated.status).toBe('proposed');
+  });
+
+  it('explains why a memory can or cannot transition', () => {
+    const oneSource = addEvidence(proposedMemory(), {
+      id: 'evidence-1',
+      sourceRef: 'security-runbook-v4',
+      capturedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const pending = decideLifecycle(oneSource, {}, new Date('2026-07-02T01:00:00.000Z'));
+    const terminal = decideLifecycle(
+      evaluateLifecycle(
+        recordReview(proposedMemory(), {
+          id: 'review-1',
+          reviewer: 'security-owner',
+          decision: 'accepted',
+          reviewedAt: '2026-07-02T00:00:00.000Z',
+          reason: 'Reviewed.',
+        }),
+        {},
+        new Date('2026-07-02T01:00:00.000Z'),
+      ),
+    );
+
+    expect(pending).toMatchObject({
+      currentStatus: 'proposed',
+      nextStatus: 'proposed',
+      transition: null,
+    });
+    expect(pending.reason).toContain('1 of 2');
+    expect(terminal).toMatchObject({
+      currentStatus: 'confirmed',
+      nextStatus: 'confirmed',
+      transition: null,
+    });
   });
 
   it('expires only proposed memories after the inactivity window', () => {

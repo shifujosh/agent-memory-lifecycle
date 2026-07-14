@@ -68,6 +68,14 @@ export const LifecyclePolicySchema = z.object({
 });
 export type LifecyclePolicy = z.infer<typeof LifecyclePolicySchema>;
 
+export const LifecycleDecisionSchema = z.object({
+  currentStatus: LifecycleStatusSchema,
+  nextStatus: LifecycleStatusSchema,
+  transition: z.enum(['confirmed', 'expired']).nullable(),
+  reason: z.string().trim().min(1),
+});
+export type LifecycleDecision = z.infer<typeof LifecycleDecisionSchema>;
+
 export const DEFAULT_POLICY: LifecyclePolicy = {
   requiredDistinctSources: 2,
   proposedTtlDays: 30,
@@ -189,47 +197,84 @@ export function distinctSourceCount(record: MemoryRecord): number {
   return new Set(record.evidence.map((item) => item.sourceRef)).size;
 }
 
-export function evaluateLifecycle(
+/**
+ * Explains the policy outcome without mutating or transitioning the record.
+ * Callers can inspect this result before persisting the record returned by
+ * evaluateLifecycle.
+ */
+export function decideLifecycle(
   record: MemoryRecord,
   policyInput: Partial<LifecyclePolicy> = {},
   now = new Date(),
-): MemoryRecord {
+): LifecycleDecision {
   const memory = MemoryRecordSchema.parse(record);
   const policy = LifecyclePolicySchema.parse({ ...DEFAULT_POLICY, ...policyInput });
 
   if (memory.status !== 'proposed') {
-    return clone(memory);
+    return LifecycleDecisionSchema.parse({
+      currentStatus: memory.status,
+      nextStatus: memory.status,
+      transition: null,
+      reason: `No automatic transition is permitted for ${memory.status} memories.`,
+    });
   }
 
-  const timestamp = nowIso(now);
   const acceptedReview = memory.reviews.find((review) => review.decision === 'accepted');
   if (acceptedReview) {
-    return transition(memory, 'confirmed', {
-      type: 'confirmed',
-      occurredAt: timestamp,
+    return LifecycleDecisionSchema.parse({
+      currentStatus: 'proposed',
+      nextStatus: 'confirmed',
+      transition: 'confirmed',
       reason: `Confirmed by accepted review from ${acceptedReview.reviewer}.`,
     });
   }
 
-  if (distinctSourceCount(memory) >= policy.requiredDistinctSources) {
-    return transition(memory, 'confirmed', {
-      type: 'confirmed',
-      occurredAt: timestamp,
-      reason: `Confirmed by ${distinctSourceCount(memory)} distinct source references.`,
+  const sourceCount = distinctSourceCount(memory);
+  if (sourceCount >= policy.requiredDistinctSources) {
+    return LifecycleDecisionSchema.parse({
+      currentStatus: 'proposed',
+      nextStatus: 'confirmed',
+      transition: 'confirmed',
+      reason: `Confirmed by ${sourceCount} distinct source references.`,
     });
   }
 
   const lastActivity = new Date(memory.lastActivityAt).getTime();
   const ttlMilliseconds = policy.proposedTtlDays * 24 * 60 * 60 * 1000;
   if (now.getTime() - lastActivity >= ttlMilliseconds) {
-    return transition(memory, 'expired', {
-      type: 'expired',
-      occurredAt: timestamp,
+    return LifecycleDecisionSchema.parse({
+      currentStatus: 'proposed',
+      nextStatus: 'expired',
+      transition: 'expired',
       reason: `Proposed memory expired after ${policy.proposedTtlDays} inactive days.`,
     });
   }
 
-  return clone(memory);
+  return LifecycleDecisionSchema.parse({
+    currentStatus: 'proposed',
+    nextStatus: 'proposed',
+    transition: null,
+    reason: `Still proposed: ${sourceCount} of ${policy.requiredDistinctSources} distinct source references and no accepted review.`,
+  });
+}
+
+export function evaluateLifecycle(
+  record: MemoryRecord,
+  policyInput: Partial<LifecyclePolicy> = {},
+  now = new Date(),
+): MemoryRecord {
+  const memory = MemoryRecordSchema.parse(record);
+  const decision = decideLifecycle(memory, policyInput, now);
+
+  if (!decision.transition) {
+    return clone(memory);
+  }
+
+  return transition(memory, decision.nextStatus, {
+    type: decision.transition,
+    occurredAt: nowIso(now),
+    reason: decision.reason,
+  });
 }
 
 export function supersedeMemory(
