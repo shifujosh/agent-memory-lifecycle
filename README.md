@@ -20,15 +20,24 @@ This project treats a memory as a **claim plus its decision history**, not as a 
 
 ## The lifecycle
 
+The normal path is intentionally short. A claim starts unverified, earns trust through a defined threshold, and stays current until a person records that a replacement has taken effect.
+
 ```mermaid
-stateDiagram-v2
-  [*] --> proposed
-  proposed --> confirmed: accepted review or two source references
-  proposed --> expired: 30 days without activity
-  confirmed --> superseded: explicit replacement event
-  proposed --> retracted: explicit retraction event
-  confirmed --> retracted: explicit retraction event
+flowchart LR
+  P["Proposed<br/>unverified claim"]
+  C["Confirmed<br/>available for the workflow"]
+  S["Superseded<br/>historical record"]
+
+  P -->|Trust threshold met| C
+  C -->|Replacement recorded| S
 ```
+
+**Trust threshold:** one accepted review, or two evidence records with distinct source references.
+
+Two deliberate exits sit outside the normal path:
+
+- A `proposed` memory becomes `expired` after 30 days without activity. Fresh evidence starts a new proposal.
+- A `proposed` or `confirmed` memory becomes `retracted` only when a person records an explicit reason.
 
 The state is a policy signal for the surrounding agent, not a confidence score:
 
