@@ -31,6 +31,6 @@
     "@typescript-eslint/parser": "^8.25.0",
     "eslint": "^9.22.0",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.9"
+    "vitest": "^5.0.0"
   }
 }

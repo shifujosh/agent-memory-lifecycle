@@ -176,7 +176,7 @@ describe('agent-memory-lifecycle', () => {
     );
 
     expect(independentSourceCount(unclassified)).toBe(0);
-    expect(decideLifecycle(unclassified).nextStatus).toBe('proposed');
+    expect(decideLifecycle(unclassified, {}, new Date('2026-07-02T02:00:00.000Z')).nextStatus).toBe('proposed');
   });
 
   it('uses the time evidence was recorded, not the age of the source, for expiry', () => {
